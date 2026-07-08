@@ -273,6 +273,7 @@
           <p class="meta"><strong>Message:</strong> <span id="message">{{ job.message }}</span></p>
           <p class="meta"><strong>Original SHA256:</strong> <span id="original-sha">{{ job.original_sha256 or 'pending' }}</span></p>
           <p class="meta"><strong>Reconstructed SHA256:</strong> <span id="reconstructed-sha">{{ job.reconstructed_sha256 or 'pending' }}</span></p>
+          <p class="meta"><strong>Chunks:</strong> <span id="chunk-count">{{ job.chunk_count or 'pending' }}</span></p>
           <div class="progress-wrap" aria-label="processing progress">
             <div class="progress-bar" id="progress-bar" style="width: {{ job.progress }}%;"></div>
           </div>
@@ -282,7 +283,8 @@
 
         <article class="card status-card">
           <h2 class="status-title">Artifacts</h2>
-          <p class="meta"><strong>PNG:</strong> <span id="png-path">{{ job.png_path or 'pending' }}</span></p>
+          <p class="meta"><strong>Encoded dir:</strong> <span id="encoded-dir">{{ job.encoded_dir or 'pending' }}</span></p>
+          <p class="meta"><strong>Manifest:</strong> <span id="manifest-path">{{ job.manifest_path or 'pending' }}</span></p>
           <p class="meta"><strong>Reconstructed file:</strong> <span id="reconstructed-path">{{ job.reconstructed_path or 'pending' }}</span></p>
           <p class="meta">The page polls the local API every second until the job completes or fails.</p>
         </article>
@@ -315,8 +317,10 @@
         const messageNode = document.getElementById('message');
         const originalSha = document.getElementById('original-sha');
         const reconstructedSha = document.getElementById('reconstructed-sha');
+        const chunkCount = document.getElementById('chunk-count');
         const errorText = document.getElementById('error-text');
-        const pngPath = document.getElementById('png-path');
+        const encodedDir = document.getElementById('encoded-dir');
+        const manifestPath = document.getElementById('manifest-path');
         const reconstructedPath = document.getElementById('reconstructed-path');
 
         const render = (job) => {
@@ -326,7 +330,9 @@
           messageNode.textContent = job.message;
           originalSha.textContent = job.original_sha256 || 'pending';
           reconstructedSha.textContent = job.reconstructed_sha256 || 'pending';
-          pngPath.textContent = job.png_path || 'pending';
+          chunkCount.textContent = job.chunk_count || 'pending';
+          encodedDir.textContent = job.encoded_dir || 'pending';
+          manifestPath.textContent = job.manifest_path || 'pending';
           reconstructedPath.textContent = job.reconstructed_path || 'pending';
           errorText.textContent = job.error || '';
         };

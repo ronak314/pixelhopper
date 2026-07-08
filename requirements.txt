@@ -1,3 +1,4 @@
 Flask>=3.0
 numpy>=1.26
 Pillow>=10.0
+zfec>=1.6.0.0

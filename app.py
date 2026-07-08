@@ -35,10 +35,12 @@ class Job:
     progress: int = 0
     message: str = "Queued"
     original_path: Path | None = None
-    png_path: Path | None = None
+    encoded_dir: Path | None = None
+    manifest_path: Path | None = None
     reconstructed_path: Path | None = None
     original_sha256: str | None = None
     reconstructed_sha256: str | None = None
+    chunk_count: int = 0
     error: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
@@ -52,8 +54,10 @@ class Job:
                 "message": self.message,
                 "original_sha256": self.original_sha256,
                 "reconstructed_sha256": self.reconstructed_sha256,
+                "chunk_count": self.chunk_count,
                 "error": self.error,
-                "png_path": str(self.png_path) if self.png_path else None,
+                "encoded_dir": str(self.encoded_dir) if self.encoded_dir else None,
+                "manifest_path": str(self.manifest_path) if self.manifest_path else None,
                 "reconstructed_path": str(self.reconstructed_path) if self.reconstructed_path else None,
             }
 
@@ -101,21 +105,21 @@ def _process_job(job: Job) -> None:
         job.update(status="processing", progress=25, message="Calculating checksum")
         job.original_sha256 = sha256_file(job.original_path)
 
-        job.update(status="processing", progress=45, message="Encoding to PNG")
-        job.png_path = PNG_DIR / f"{job.id}.png"
-        encode_file_to_png(job.original_path, job.png_path)
+        job.update(status="processing", progress=45, message="Encoding into PNG chunks")
+        job.encoded_dir = PNG_DIR
+        encode_result = encode_file_to_png(job.original_path, job.encoded_dir)
+        job.manifest_path = encode_result.manifest_path
+        job.chunk_count = len(encode_result.chunk_paths)
 
-        job.update(status="processing", progress=70, message="Reconstructing file")
-        reconstructed_name = secure_filename(job.filename) or f"reconstructed_{job.id}"
-        job.reconstructed_path = RECONSTRUCTED_DIR / f"{job.id}_{reconstructed_name}"
-        decode_png_to_file(job.png_path, job.reconstructed_path)
+        job.update(status="processing", progress=70, message="Reconstructing from manifest")
+        job.reconstructed_path = decode_png_to_file(job.manifest_path, RECONSTRUCTED_DIR / job.filename)
 
         job.update(status="processing", progress=90, message="Verifying checksum")
         job.reconstructed_sha256 = sha256_file(job.reconstructed_path)
         if job.original_sha256 != job.reconstructed_sha256:
             raise ValueError("checksum mismatch after reconstruction")
 
-        job.update(status="complete", progress=100, message="Processing complete")
+        job.update(status="complete", progress=100, message=f"Processing complete ({job.chunk_count} chunks)")
     except Exception as exc:
         job.update(status="failed", message="Processing failed", error=str(exc))
 
