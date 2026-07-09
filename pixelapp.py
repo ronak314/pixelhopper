@@ -1,9 +1,13 @@
-"""Flask interface for uploading files and monitoring processing status."""
+"""Flask interface for uploading files, encoding them, and pushing to Pixel."""
 
 from __future__ import annotations
 
 import threading
 import uuid
+import subprocess
+import sys
+import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -14,22 +18,26 @@ import zipfile
 from flask import Flask, abort, after_this_request, jsonify, render_template, request, send_file
 from werkzeug.utils import secure_filename
 
+# Import local encoder functions
 from png_encoder import (
     encode_file_to_png,
     decode_png_to_file,
     sha256_file,
 )
 
-
 BASE_DIR = Path(__file__).resolve().parent
+
+# Target workspace paths
+PIXEL_HOPPING_DIR = BASE_DIR / "PixelHopping"
+LAUNDERING_DIR = PIXEL_HOPPING_DIR / "laundering"
+SCRIPT_PATH = PIXEL_HOPPING_DIR / "NEWPixelHopping.py"
+
 UPLOAD_DIR = BASE_DIR / "uploads"
 PNG_DIR = BASE_DIR / "encoded_png"
 RECONSTRUCTED_DIR = BASE_DIR / "reconstructed"
 DECODE_UPLOAD_DIR = BASE_DIR / "decode_uploads"
 
-
-Status = Literal["queued", "processing", "complete", "failed"]
-
+Status = Literal["queued", "processing", "pushing_to_pixel", "complete", "failed"]
 
 @dataclass
 class Job:
@@ -41,8 +49,6 @@ class Job:
     original_path: Path | None = None
     encoded_dir: Path | None = None
     manifest_path: Path | None = None
-    reconstructed_path: Path | None = None
-    original_sha256: str | None = None
     chunk_count: int = 0
     error: str | None = None
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -55,11 +61,8 @@ class Job:
                 "status": self.status,
                 "progress": self.progress,
                 "message": self.message,
-                "original_sha256": self.original_sha256,
                 "chunk_count": self.chunk_count,
                 "error": self.error,
-                "encoded_dir": str(self.encoded_dir) if self.encoded_dir else None,
-                "manifest_path": str(self.manifest_path) if self.manifest_path else None,
                 "chunks": _chunk_list(self.id, self.encoded_dir) if self.encoded_dir else [],
             }
 
@@ -74,18 +77,22 @@ class Job:
             if error is not None:
                 self.error = error
 
+# template_folder="." tells Flask to look in the same folder for index.html
+import os
 
-app = Flask(__name__)
+# Dynamically find the exact folder pixelapp.py lives in
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
+
+app = Flask(__name__, template_folder=TEMPLATE_DIR)
 app.config["MAX_CONTENT_LENGTH"] = 256 * 1024 * 1024
 
 JOBS: dict[str, Job] = {}
 JOBS_LOCK = threading.Lock()
 
-
 def _ensure_directories() -> None:
-    for directory in (UPLOAD_DIR, PNG_DIR, RECONSTRUCTED_DIR, DECODE_UPLOAD_DIR):
+    for directory in (UPLOAD_DIR, PNG_DIR, RECONSTRUCTED_DIR, DECODE_UPLOAD_DIR, LAUNDERING_DIR):
         directory.mkdir(parents=True, exist_ok=True)
-
 
 def _create_job(filename: str) -> Job:
     job = Job(id=uuid.uuid4().hex, filename=filename)
@@ -93,30 +100,46 @@ def _create_job(filename: str) -> Job:
         JOBS[job.id] = job
     return job
 
+def _chunk_list(job_id: str, encoded_dir: Path | None) -> list[dict[str, str]]:
+    if encoded_dir is None or not encoded_dir.exists():
+        return []
+    return [{"name": p.name, "url": f"/api/jobs/{job_id}/chunks/{p.name}"} for p in sorted(encoded_dir.glob("*.png"))]
 
 def _process_job(job: Job) -> None:
     try:
-        job.update(status="processing", progress=10, message="Saving uploaded file")
+        job.update(status="processing", progress=10, message="Saving uploaded file...")
         if job.original_path is None or not job.original_path.exists():
-            raise FileNotFoundError("uploaded file is missing")
-    except Exception as exc:  # pragma: no cover - defensive path
-        job.update(status="failed", progress=0, message="Failed to persist upload", error=str(exc))
-        return
-
-    try:
-        job.update(status="processing", progress=25, message="Calculating checksum")
-        job.original_sha256 = sha256_file(job.original_path)
-
-        job.update(status="processing", progress=45, message="Encoding into PNG chunks")
+            raise FileNotFoundError("Uploaded file missing.")
+        
+        # 1. Encode into PNG Chunks
+        job.update(status="processing", progress=30, message="Encoding file into PNG chunks...")
         job.encoded_dir = PNG_DIR / job.id
         encode_result = encode_file_to_png(job.original_path, job.encoded_dir)
         job.manifest_path = encode_result.manifest_path
         job.chunk_count = len(encode_result.chunk_paths)
 
-        job.update(status="complete", progress=100, message=f"Encoding complete ({job.chunk_count} PNGs)")
-    except Exception as exc:
-        job.update(status="failed", message="Processing failed", error=str(exc))
+        # 2. Relocate to PixelHopping/laundering directory
+        job.update(status="pushing_to_pixel", progress=60, message="Moving chunks to laundering pipeline...")
+        for chunk in job.encoded_dir.glob("*.png"):
+            shutil.copy(chunk, LAUNDERING_DIR / chunk.name)
+        if job.manifest_path and job.manifest_path.exists():
+            shutil.copy(job.manifest_path, LAUNDERING_DIR / job.manifest_path.name)
 
+        # 3. Fire-off the ADB Automation Script
+        job.update(status="pushing_to_pixel", progress=80, message="Executing mobile transfer script...")
+        if SCRIPT_PATH.exists():
+            result = subprocess.run([sys.executable, str(SCRIPT_PATH)], capture_output=True, text=True, check=False)
+            if result.returncode != 0:
+                print(f"Script Error: {result.stderr}")
+                raise RuntimeError(f"ADB Automation script failed: {result.stderr}")
+        else:
+            raise FileNotFoundError(f"Automation target script not found at expected location: {SCRIPT_PATH}")
+
+        # 4. Final Success Confirmation
+        job.update(status="complete", progress=100, message="Uploaded to pixel ✅")
+        
+    except Exception as exc:
+        job.update(status="failed", message="Processing broke down", error=str(exc))
 
 @app.get("/")
 def index() -> str:
@@ -126,7 +149,7 @@ def index() -> str:
 def api_encode() -> object:
     uploaded_file = request.files.get("file")
     if uploaded_file is None or uploaded_file.filename == "":
-        return jsonify({"error": "Choose a file to upload."}), 400
+        return jsonify({"error": "Choose a valid file to process."}), 400
 
     _ensure_directories()
 
@@ -143,18 +166,19 @@ def api_encode() -> object:
 
 @app.get("/api/jobs/<job_id>")
 def job_status(job_id: str):
-    job = _get_job(job_id)
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
     if job is None:
         return jsonify({"error": "unknown job"}), 404
     return jsonify(job.snapshot())
 
 @app.get("/api/jobs/<job_id>/chunks/<path:filename>")
 def job_chunk(job_id: str, filename: str):
-    job = _get_job(job_id)
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
     if job is None or job.encoded_dir is None:
         abort(404)
 
-    # prevent traversal
     safe_name = Path(filename).name
     if safe_name != filename:
         abort(404)
@@ -165,13 +189,13 @@ def job_chunk(job_id: str, filename: str):
 
     return send_file(chunk_path, mimetype="image/png")
 
-
 @app.get("/api/jobs/<job_id>/download_all")
 def download_all(job_id: str):
-    job = _get_job(job_id)
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
     if job is None or job.encoded_dir is None:
         abort(404)
-    if job.status != "complete":
+    if job.status != "complete" and job.status != "pushing_to_pixel":
         return jsonify({"error": "job not complete"}), 409
 
     encoded_dir = job.encoded_dir
@@ -184,7 +208,6 @@ def download_all(job_id: str):
 
     with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as z:
         for file in sorted(encoded_dir.glob("*.png")):
-            # put them under a folder inside the zip for nicer UX
             z.write(file, arcname=f"{job.id}_encoded_png/{file.name}")
 
     @after_this_request
@@ -202,17 +225,14 @@ def download_all(job_id: str):
         mimetype="application/zip",
     )
 
-
 @app.post("/decode")
 def decode() -> object:
-    """Decode an uploaded folder or set of PNGs back into the original file."""
     files = request.files.getlist("files")
     if not files:
         return "Upload at least one encoded PNG.", 400
 
     _ensure_directories()
 
-    # put all uploaded files into a per-request folder
     job_id = uuid.uuid4().hex
     target_dir = DECODE_UPLOAD_DIR / job_id
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -220,9 +240,6 @@ def decode() -> object:
     for f in files:
         if not f or not f.filename:
             continue
-        # When the user uploads a directory, Werkzeug/Flask often includes the
-        # relative path in `filename` (e.g. "folder/name.png"). We only want
-        # the actual base filename so it matches the manifest's chunk list.
         safe_name = secure_filename(Path(f.filename).name)
         if not safe_name:
             continue
@@ -231,7 +248,6 @@ def decode() -> object:
     if not any(target_dir.iterdir()):
         return "No valid files uploaded.", 400
 
-    # Let png_encoder discover the manifest and reconstruct the original.
     try:
         output_path = decode_png_to_file(target_dir)
     except Exception as exc:
@@ -253,16 +269,6 @@ def decode() -> object:
         download_name=Path(output_path).name,
     )
 
-
-def _get_job(job_id: str) -> Job | None:
-    with JOBS_LOCK:
-        return JOBS.get(job_id)
-
-def _chunk_list(job_id: str, encoded_dir: Path | None) -> list[dict[str, str]]:
-    if encoded_dir is None or not encoded_dir.exists():
-        return []
-    return [{"name": p.name, "url": f"/api/jobs/{job_id}/chunks/{p.name}"} for p in sorted(encoded_dir.glob("*.png"))]
-
 if __name__ == "__main__":
     _ensure_directories()
-    app.run(host="127.0.0.1", port=6767, debug=True)
+    app.run(host="0.0.0.0", port=6767)

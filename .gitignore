@@ -1,7 +1,9 @@
 uploads/
 encoded_png/
 reconstructed/
-PixelHopping.py
 tempCodeRunnerFile.py
 .DS_Store
 decode_uploads/
+PixelHopping/laundering/
+PixelHopping/trash/
+PixelHopping/preload/
